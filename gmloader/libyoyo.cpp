@@ -31,6 +31,9 @@ ABI_ATTR void (*CThread__start_NS)(CThread *, void *, void *) = NULL;
 ABI_ATTR void (*CThread__start_PcNS)(CThread *, void *, void *, char *) = NULL;
 ABI_ATTR void (*FreePNGFile)() = NULL;
 ABI_ATTR void (*GamepadUpdate)() = NULL;
+ABI_ATTR void (*IO_Char_Last_Set)(char c) = NULL;
+ABI_ATTR const char *(*IO_String_Get)() = NULL;
+ABI_ATTR void (*IO_String_Set)(const char *str) = NULL;
 ABI_ATTR void (*InitLLVM)(LLVMVars *) = NULL;
 ABI_ATTR void (*InvalidateTextureState)() = NULL;
 ABI_ATTR void (*MemoryManager__Free)(void *) = NULL;
@@ -337,6 +340,9 @@ void patch_libyoyo(so_module *mod)
     FIND_SYMBOL(mod, ExecuteIt_flags, "_Z9ExecuteItP9CInstanceS0_P5CCodeP6RValuei");
     FIND_SYMBOL(mod, MemoryManager__Free, "_ZN13MemoryManager4FreeEPv", "_ZN13MemoryManager4FreeEPKv");
     FIND_SYMBOL(mod, MemoryManager__Free_2, "_ZN13MemoryManager4FreeEPKvb");
+    FIND_SYMBOL(mod, IO_Char_Last_Set, "_Z16IO_Char_Last_Setc");
+    FIND_SYMBOL(mod, IO_String_Get, "_Z13IO_String_Getv");
+    FIND_SYMBOL(mod, IO_String_Set, "_Z13IO_String_SetPKc");
 
     // Unavailable in newer versions
     FIND_SYMBOL(mod, g_nInstanceVariables, "g_nInstanceVariables"); /* Can be used to sus out for the older OUYA runners... */

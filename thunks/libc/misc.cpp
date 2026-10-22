@@ -10,19 +10,59 @@
 #include <stdarg.h>
 #include <link.h>
 #include <sys/syscall.h>
+#include <sys/ioctl.h>
+#include <syslog.h>
+#include <netdb.h>
 #include "platform.h"
 #include "so_util.h"
+#include <vector>
 
 #include "bionic_file.h"
 
+extern std::vector<so_module *> loaded_modules;
+
+// The guest unwinder (GML try/catch) finds .eh_frame_hdr through this
 extern "C" ABI_ATTR int dl_iterate_phdr_impl(
                  int (*callback)(struct dl_phdr_info *info,
                                  size_t size, void *data),
                  void *data)
 {
-    // TODO:: Implement a reasonable version of this.
-    fatal_error("-- dl_iterate_phdr was called! --\n");
-    return -1;
+    for (so_module *&mod: loaded_modules) {
+        // The first PT_LOAD maps the ELF header, so the original phdrs are in the image
+        Elf_Ehdr *ehdr = (Elf_Ehdr *)mod->base;
+        if (memcmp(ehdr->e_ident, ELFMAG, SELFMAG) != 0)
+            continue;
+
+        // so_load rebases PT_LOAD[0].p_vaddr before copying the segment that holds the
+        // header table, so hand out a copy with every vaddr relative again
+        static std::vector<std::vector<Elf_Phdr>> phdr_copies(loaded_modules.size());
+        size_t idx = &mod - &loaded_modules[0];
+        if (phdr_copies.size() <= idx)
+            phdr_copies.resize(loaded_modules.size());
+        std::vector<Elf_Phdr> &phdrs = phdr_copies[idx];
+        if (phdrs.empty()) {
+            Elf_Phdr *src = (Elf_Phdr *)(mod->base + ehdr->e_phoff);
+            phdrs.assign(src, src + ehdr->e_phnum);
+            for (Elf_Phdr &p: phdrs) {
+                if (p.p_vaddr >= mod->base) {
+                    p.p_vaddr -= mod->base;
+                    p.p_paddr = p.p_vaddr;
+                }
+            }
+        }
+
+        struct dl_phdr_info info = {};
+        info.dlpi_addr = mod->base;
+        info.dlpi_name = mod->soname ? mod->soname : "";
+        info.dlpi_phdr = (const ElfW(Phdr) *)phdrs.data();
+        info.dlpi_phnum = phdrs.size();
+
+        int ret = callback(&info, sizeof(info), data);
+        if (ret)
+            return ret;
+    }
+
+    return 0;
 }
 
 extern "C" ABI_ATTR int login_tty_impl(int fd)
@@ -160,6 +200,71 @@ extern "C" ABI_ATTR int __system_property_get_impl(const char *name, char *value
 
 extern "C" ABI_ATTR int __open_2_impl(const char* pathname, int flags) {
   return open(pathname, flags);
+}
+
+// Variadic calls the thunk generator can't forward; the kernel ABI is the same as bionic's
+extern "C" ABI_ATTR int open_impl(const char* pathname, int flags, ...) {
+  va_list ap;
+  va_start(ap, flags);
+  mode_t mode = (flags & (O_CREAT | O_TMPFILE)) ? va_arg(ap, int) : 0;
+  va_end(ap);
+  return open(pathname, flags, mode);
+}
+
+extern "C" ABI_ATTR int fcntl_impl(int fd, int cmd, ...) {
+  va_list ap;
+  va_start(ap, cmd);
+  void *arg = va_arg(ap, void *);
+  va_end(ap);
+  return fcntl(fd, cmd, arg);
+}
+
+extern "C" ABI_ATTR int ioctl_impl(int fd, int request, ...) {
+  va_list ap;
+  va_start(ap, request);
+  void *arg = va_arg(ap, void *);
+  va_end(ap);
+  return ioctl(fd, request, arg);
+}
+
+extern "C" ABI_ATTR void syslog_impl(int priority, const char* fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  vsyslog(priority, fmt, ap);
+  va_end(ap);
+}
+
+extern "C" ABI_ATTR void __assert2_impl(const char* file, int line, const char* function, const char* msg) {
+  fatal_error("%s:%d: %s: assertion \"%s\" failed\n", file, line, function, msg);
+  abort();
+}
+
+// bionic's struct addrinfo has ai_canonname before ai_addr, glibc the other way round
+static void swap_addrinfo(struct addrinfo *ai) {
+  for (; ai; ai = ai->ai_next) {
+    void *tmp = ai->ai_addr;
+    ai->ai_addr = (struct sockaddr *)ai->ai_canonname;
+    ai->ai_canonname = (char *)tmp;
+  }
+}
+
+extern "C" ABI_ATTR int getaddrinfo_impl(const char *node, const char *service,
+                                         const struct addrinfo *hints, struct addrinfo **res) {
+  struct addrinfo h;
+  if (hints) {
+    h = *hints;
+    h.ai_next = NULL;
+    swap_addrinfo(&h);
+  }
+  int ret = getaddrinfo(node, service, hints ? &h : NULL, res);
+  if (ret == 0)
+    swap_addrinfo(*res);
+  return ret;
+}
+
+extern "C" ABI_ATTR void freeaddrinfo_impl(struct addrinfo *res) {
+  swap_addrinfo(res);
+  freeaddrinfo(res);
 }
 
 // Taken from https://github.com/libhybris/libhybris/blob/master/hybris/common/hooks.c

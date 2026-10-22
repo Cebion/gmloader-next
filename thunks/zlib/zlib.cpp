@@ -1,4 +1,5 @@
 #include <filesystem>
+#include <mutex>
 #include <stdlib.h>
 #include <zlib.h>
 #include <zip.h>
@@ -31,6 +32,10 @@ Original code of the function can be found here:
 https://android.googlesource.com/platform/frameworks/base/+/master/native/android/asset_manager.cpp
 */
 
+// One libzip archive handle is shared by every asset, and the runner reads streamed
+// audio from its own thread, so serialise all access to it
+static std::recursive_mutex aasset_lock;
+
 ABI_ATTR void *AAssetManager_fromJava_impl(void *env, void *obj)
 {
     int err;
@@ -56,6 +61,7 @@ ABI_ATTR void *AAssetManager_fromJava_impl(void *env, void *obj)
 
 ABI_ATTR void *AAssetManager_open_impl(void *mgr, const char *filename, int mode)
 {
+    std::lock_guard<std::recursive_mutex> guard(aasset_lock);
 
     /* We don't care about AccessMode for now, but for future reference:
     https://android.googlesource.com/platform/frameworks/base/+/master/libs/androidfw/include/androidfw/Asset.h
@@ -99,6 +105,7 @@ ABI_ATTR void *AAssetManager_open_impl(void *mgr, const char *filename, int mode
 
 ABI_ATTR off_t AAsset_getLength_impl(void *f)
 {
+    std::lock_guard<std::recursive_mutex> guard(aasset_lock);
     AAsset_impl* asset = (AAsset_impl*)f;
     if(!asset)
     {
@@ -119,6 +126,7 @@ ABI_ATTR off_t AAsset_getLength_impl(void *f)
 
 ABI_ATTR off_t AAsset_read_impl(void *f, void *buf, size_t count)
 {
+    std::lock_guard<std::recursive_mutex> guard(aasset_lock);
     AAsset_impl* asset = (AAsset_impl*)f;
     int nread;
 
@@ -151,6 +159,7 @@ ABI_ATTR off_t AAsset_read_impl(void *f, void *buf, size_t count)
 
 ABI_ATTR void AAsset_close_impl(void *f)
 {
+    std::lock_guard<std::recursive_mutex> guard(aasset_lock);
     AAsset_impl* asset = (AAsset_impl*)f;
     if (asset) {
         if (asset->file) {
@@ -163,12 +172,21 @@ ABI_ATTR void AAsset_close_impl(void *f)
 
 ABI_ATTR off_t AAsset_seek_impl(void* asset_ptr, off_t offset, int whence)
 {
+    std::lock_guard<std::recursive_mutex> guard(aasset_lock);
     AAsset_impl* asset = (AAsset_impl*)asset_ptr;
-    asset->persistent_read = true;
-    
-    if (!asset || !asset->file) {
+    if (!asset) {
         fatal_error("[AAsset] Cannot seek NULL asset.\n");
         return -1;
+    }
+    asset->persistent_read = true;
+
+    // Decoders (e.g. Ogg streams) seek before their first read, so open the entry here
+    if (!asset->file) {
+        if ((asset->file = zip_fopen_index(asset->mgr->apk, asset->index, ZIP_FL_UNCHANGED)) == NULL) {
+            fatal_error("[AAsset] Cannot open file (index = %ld).\n", asset->index);
+            return -1;
+        }
+        asset->current_offset = 0;
     }
 
     if (zip_file_is_seekable(asset->file))
@@ -268,6 +286,7 @@ DynLibFunction symtable_zlib[] = {
     THUNK_DIRECT(deflateInit2_),
     THUNK_DIRECT(deflateReset),
     THUNK_DIRECT(crc32),
+    THUNK_DIRECT(zError),
 
     NO_THUNK("AAssetManager_fromJava", (uintptr_t)&AAssetManager_fromJava_impl),
     NO_THUNK("AAssetManager_open", (uintptr_t)&AAssetManager_open_impl),

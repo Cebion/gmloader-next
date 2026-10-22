@@ -595,3 +595,8 @@ float strtof_l(const char* __s, char** __end_ptr, locale_t __l) __INTRODUCED_IN(
 long strtol_l(const char* __s, char** __end_ptr, int, locale_t __l) __INTRODUCED_IN(26);
 char *index(const char *p, int ch);
 wchar_t *wcswcs (const wchar_t *__haystack, const wchar_t *__needle);
+unsigned if_nametoindex(const char* __name);
+char* if_indextoname(unsigned __index, char* __buf);
+struct statvfs;
+int statvfs(const char* __path, struct statvfs* __buf);
+int fstatvfs(int __fd, struct statvfs* __buf);

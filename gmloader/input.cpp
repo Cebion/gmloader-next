@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
+#include <string>
 
 #include "platform.h"
 #include "so_util.h"
@@ -62,8 +63,10 @@ static int get_free_yoyogamepad_slot()
 
 static void keyboard_set_key_raw(int key, int state)
 {
-    if (state)
+    if (state) {
         *_IO_CurrentKey = key;
+        *(int32_t *)_IO_LastKey = key;
+    }
     else if (!state && *_IO_CurrentKey == key)
         *_IO_CurrentKey = -1;
     _IO_KeyDown[key] = state;
@@ -167,6 +170,70 @@ static void keyboard_set_key(SDL_Keycode key, int state)
     }
 }
 
+// US layout, there is no SDL_TEXTINPUT on most KMSDRM devices.
+static int keyboard_char(SDL_Keycode key, Uint16 mod)
+{
+    static const char shifted_digits[] = ")!@#$%^&*(";
+    int shift = (mod & KMOD_SHIFT) != 0;
+
+    if (key >= SDLK_a && key <= SDLK_z)
+        return (shift != ((mod & KMOD_CAPS) != 0)) ? key + ('A' - 'a') : key;
+    if (key >= SDLK_0 && key <= SDLK_9)
+        return shift ? shifted_digits[key - SDLK_0] : key;
+    if (key >= SDLK_KP_1 && key <= SDLK_KP_9)
+        return '1' + (key - SDLK_KP_1);
+
+    switch (key)
+    {
+    case SDLK_SPACE:        return ' ';
+    case SDLK_BACKSPACE:    return '\b';
+    case SDLK_MINUS:        return shift ? '_' : '-';
+    case SDLK_EQUALS:       return shift ? '+' : '=';
+    case SDLK_LEFTBRACKET:  return shift ? '{' : '[';
+    case SDLK_RIGHTBRACKET: return shift ? '}' : ']';
+    case SDLK_BACKSLASH:    return shift ? '|' : '\\';
+    case SDLK_SEMICOLON:    return shift ? ':' : ';';
+    case SDLK_QUOTE:        return shift ? '"' : '\'';
+    case SDLK_COMMA:        return shift ? '<' : ',';
+    case SDLK_PERIOD:       return shift ? '>' : '.';
+    case SDLK_SLASH:        return shift ? '?' : '/';
+    case SDLK_BACKQUOTE:    return shift ? '~' : '`';
+    case SDLK_KP_0:         return '0';
+    case SDLK_KP_PERIOD:    return '.';
+    case SDLK_KP_DIVIDE:    return '/';
+    case SDLK_KP_MULTIPLY:  return '*';
+    case SDLK_KP_MINUS:     return '-';
+    case SDLK_KP_PLUS:      return '+';
+    default:
+        return 0;
+    }
+}
+
+// Feeds keyboard_lastchar and keyboard_string, like the desktop runners do.
+static void keyboard_type_char(SDL_Keycode key, Uint16 mod)
+{
+    int c = keyboard_char(key, mod);
+    if (c == 0)
+        return;
+
+    if (IO_Char_Last_Set)
+        IO_Char_Last_Set(c);
+
+    if (!IO_String_Get || !IO_String_Set)
+        return;
+
+    std::string str = IO_String_Get();
+    if (c == '\b') {
+        while (!str.empty() && (str.back() & 0xC0) == 0x80)
+            str.pop_back();
+        if (!str.empty())
+            str.pop_back();
+    } else {
+        str += (char)c;
+    }
+    IO_String_Set(str.c_str());
+}
+
 ABI_ATTR void RegisterAndroidKeyEvent(int state, int key)
 {
     keyboard_set_key_raw(key, state ? 0 : 1);
@@ -201,7 +268,6 @@ int update_inputs(SDL_Window *win)
     memset(_IO_KeyPressed, 0, N_KEYS);
     memset(_IO_KeyReleased, 0, N_KEYS);
 
-    *_IO_LastKey = *_IO_CurrentKey;
     // Other events (keyboard, gamepad hotplug, etc)
     SDL_Event ev;
 
@@ -282,6 +348,8 @@ int update_inputs(SDL_Window *win)
                 break;
 
             keyboard_set_key(ev.key.keysym.sym, ev.key.state);
+            if (ev.key.state == SDL_PRESSED)
+                keyboard_type_char(ev.key.keysym.sym, ev.key.keysym.mod);
             break;
         case SDL_QUIT:
             return 0;
